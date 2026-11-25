@@ -1,0 +1,5 @@
+# Streamlit app
+streamlit
+pandas
+pydeck
+google-cloud-bigquery   # reads the class_info.classes view when BQ secrets are set

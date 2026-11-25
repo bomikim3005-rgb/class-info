@@ -1,0 +1,50 @@
+# Daily scrape: studio booking pages (next 60 days) -> BigQuery class_info dataset.
+#
+# Repo secrets needed (Settings -> Secrets and variables -> Actions):
+#   GCP_SA_KEY   full contents of the service account JSON key (one that can write:
+#                job-posting-monitor's pipeline account works)
+#   BQ_PROJECT   Google Cloud project ID
+name: scrape
+
+on:
+  schedule:
+    # 12:17 UTC = 4:17 Pacific (PST), before any class starts, so the day's classes
+    # are captured while they're still listed. GitHub may start it a few minutes late.
+    - cron: "17 12 * * *"
+  workflow_dispatch:        # "Run workflow" button for manual runs
+
+concurrency:
+  group: scrape             # never two runs at once
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest  # comes with Google Chrome installed
+    timeout-minutes: 20
+    env:
+      BQ_PROJECT: ${{ secrets.BQ_PROJECT }}
+      GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/../gcp-key.json
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-pipeline.txt
+
+      - name: Install
+        run: pip install -r requirements-pipeline.txt
+
+      - name: Write service account key
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        # Written outside the checkout so it can never be committed; the runner is
+        # destroyed after the job.
+        run: printf '%s' "$GCP_SA_KEY" > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Scrape booking pages -> BigQuery
+        run: python update_schedules.py --bigquery

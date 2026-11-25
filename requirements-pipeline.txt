@@ -1,0 +1,3 @@
+# Daily scrape (update_schedules.py --bigquery). Also needs Google Chrome installed.
+websocket-client
+google-cloud-bigquery
