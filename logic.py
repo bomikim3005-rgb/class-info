@@ -1,5 +1,5 @@
 """Data loading and filtering for the Bay Area dance class map."""
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -47,31 +47,50 @@ def with_time_columns(classes: pd.DataFrame) -> pd.DataFrame:
                           time_label=start.dt.strftime("%I:%M %p").str.lstrip("0"))
 
 
-def classes_on(classes: pd.DataFrame, day: date, name_query: str = "",
-               hour_range=(0, 23), instructor_query: str = "") -> pd.DataFrame:
-    """Classes on `day`, with optional filters.
+def classes_between(classes: pd.DataFrame, first: date, last: date, name_query: str = "",
+                    hour_range=(0, 23), instructor_query: str = "") -> pd.DataFrame:
+    """Classes from `first` through `last`, one row per class occurrence, with filters.
 
-    Rows with a `date` (YYYY-MM-DD) are live listings from a studio's booking page.
-    Rows without one are its regular weekly timetable. On days a studio's live
-    listings cover, only those are shown; on other days, its weekly rows are.
-    The `source` column says which one each row came from.
+    Rows with a `date` (YYYY-MM-DD) are listings from a studio's booking page. Rows
+    without one are its regular weekly timetable. On dates a studio's listings cover,
+    only those are used; on other dates, its weekly rows are repeated onto each
+    matching weekday. The `source` column says which one each row came from.
     """
-    iso = day.isoformat()
-    span = classes[classes["date"] != ""].groupby("studio")["date"].agg(["min", "max"])
-    live = span.index[(span["min"] <= iso) & (span["max"] >= iso)]
-    weekly = ((classes["date"] == "") & (classes["weekday"] == day.strftime("%a"))
-              & ~classes["studio"].isin(live))
-    df = classes[weekly | (classes["date"] == iso)].copy()
-    df["source"] = df["date"].map(lambda d: "booking page" if d else "weekly timetable")
+    dated = classes[classes["date"] != ""]
+    weekly = classes[classes["date"] == ""]
+    span = dated.groupby("studio")["date"].agg(["min", "max"])
+    frames = [dated[(dated["date"] >= first.isoformat()) & (dated["date"] <= last.isoformat())]
+              .assign(source="booking page")]
+    if not weekly.empty:
+        for i in range((last - first).days + 1):
+            day = first + timedelta(days=i)
+            iso = day.isoformat()
+            live = span.index[(span["min"] <= iso) & (span["max"] >= iso)]
+            frames.append(weekly[(weekly["weekday"] == day.strftime("%a"))
+                                 & ~weekly["studio"].isin(live)]
+                          .assign(date=iso, source="weekly timetable"))
+    df = pd.concat(frames, ignore_index=True)
     if name_query.strip():
         df = df[df["class_name"].str.contains(name_query.strip(), case=False, regex=False)]
     df = df[(df["hour"] >= hour_range[0]) & (df["hour"] <= hour_range[1])]
     if instructor_query.strip():
         df = df[df["instructor"].str.contains(instructor_query.strip(), case=False, regex=False)]
-    return df.sort_values(["start", "studio"])
+    df = df.assign(date_label=pd.to_datetime(df["date"]).dt.strftime("%a, %b %-d"))
+    return df.sort_values(["date", "start", "studio"]).reset_index(drop=True)
 
 
-def studio_summary(studios: pd.DataFrame, todays: pd.DataFrame) -> pd.DataFrame:
+def date_bounds(classes: pd.DataFrame, today: date) -> tuple:
+    """First and last dates with dated classes (today if there are none)."""
+    dated = classes.loc[classes["date"] != "", "date"]
+    if dated.empty:
+        return today, today
+    return date.fromisoformat(dated.min()), date.fromisoformat(dated.max())
+
+
+TOOLTIP_CLASSES = 6  # classes listed in a map tooltip before "...and N more"
+
+
+def studio_summary(studios: pd.DataFrame, picked: pd.DataFrame) -> pd.DataFrame:
     """One row per studio with class count and a tooltip string for the map.
 
     The tooltip is plain text with one class per line: the map escapes HTML in
@@ -80,24 +99,26 @@ def studio_summary(studios: pd.DataFrame, todays: pd.DataFrame) -> pd.DataFrame:
     out = studios.copy()
 
     def tip(name: str) -> str:
-        rows = todays[todays["studio"] == name]
+        rows = picked[picked["studio"] == name]
         if rows.empty:
-            return "No classes listed for this day"
-        footer = ("\n(regular weekly timetable, may be out of date)"
-                  if (rows["source"] == "weekly timetable").any() else "")
+            return "No classes listed for these dates"
         lines = []
-        for r in rows.itertuples():
+        for r in rows.head(TOOLTIP_CLASSES).itertuples():
             # Skip the instructor when the class name already includes it.
             who = (f" - {r.instructor}"
                    if r.instructor and r.instructor.lower() not in r.class_name.lower() else "")
-            lines.append(f"{r.time_label}  {r.class_name}{who}")
-        return "\n".join(lines) + footer
+            lines.append(f"{r.date_label}, {r.time_label}  {r.class_name}{who}")
+        if len(rows) > TOOLTIP_CLASSES:
+            lines.append(f"...and {len(rows) - TOOLTIP_CLASSES} more (see the list below the map)")
+        if (rows["source"] == "weekly timetable").any():
+            lines.append("(includes the regular weekly timetable, which may be out of date)")
+        return "\n".join(lines)
 
-    out["n_classes"] = out["studio"].map(todays["studio"].value_counts()).fillna(0).astype(int)
+    out["n_classes"] = out["studio"].map(picked["studio"].value_counts()).fillna(0).astype(int)
     out["tooltip"] = out["studio"].apply(tip)
     # teal when classes exist, gray when none
     out["color"] = out["n_classes"].apply(lambda n: [0, 150, 136, 200] if n else [150, 150, 150, 160])
     # Count only where there are classes: nearby studios' labels would overlap,
-    # and the gray dot already says "none today".
+    # and the gray dot already says "none".
     out["label"] = out["n_classes"].apply(lambda n: str(n) if n else "")
     return out

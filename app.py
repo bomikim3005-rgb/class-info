@@ -65,18 +65,25 @@ if project and key:
 classes = L.with_time_columns(classes)
 st.caption(source_note)
 
+today = date.today()
+first_date, last_date = L.date_bounds(classes, today)
 with st.sidebar:
-    day = st.date_input("Date", value=date.today(),
-                        min_value=date.today() - timedelta(days=60),
-                        max_value=date.today() + timedelta(days=60))
+    picked_range = st.date_input(
+        "Dates", value=(first_date, last_date),
+        min_value=min(first_date, today - timedelta(days=60)),
+        max_value=max(last_date, today + timedelta(days=60)),
+        help="Defaults to every date with classes. Pick a start and an end date.")
     name_query = st.text_input("Class name contains", placeholder="e.g. hip hop, house")
-    hours = st.slider("Start time (hour)", 0, 23, (10, 22))
+    hours = st.slider("Start time (hour)", 0, 23, (0, 23))
     who = st.text_input("Instructor contains")
 
-todays = L.classes_on(classes, day, name_query, hours, who)
-summary = L.studio_summary(studios, todays)
+# While picking, the widget briefly returns only the start date.
+start_day, end_day = (picked_range if len(picked_range) == 2
+                      else (picked_range[0], picked_range[0]))
+picked = L.classes_between(classes, start_day, end_day, name_query, hours, who)
+summary = L.studio_summary(studios, picked)
 
-st.subheader(f"{day.strftime('%A, %b %d')}: {len(todays)} classes")
+st.subheader(f"{len(picked):,} class{'' if len(picked) == 1 else 'es'}")
 
 # Studios with classes last, so they draw on top of nearby studios without any.
 on_map = summary.sort_values("n_classes")
@@ -118,25 +125,31 @@ st.pydeck_chart(pdk.Deck(
 ))
 
 for r in summary.sort_values("n_classes", ascending=False).itertuples():
-    with st.expander(f"{r.studio} ({r.n_classes} classes)", expanded=r.n_classes > 0):
+    with st.expander(f"{r.studio} ({r.n_classes} class{'' if r.n_classes == 1 else 'es'})",
+                     expanded=r.n_classes > 0):
         st.caption(f"{r.address} | {r.url}")
         if r.notes:
             st.caption(f"Note: {r.notes}")
-        rows = todays[todays["studio"] == r.studio]
-        if (rows["source"] == "booking page").any():
-            st.caption("Live from the studio's booking page.")
-        elif not rows.empty:
-            st.caption("Regular weekly timetable, which may be out of date: this day is "
-                       "beyond what the booking page lists. Check the studio's site.")
+        rows = picked[picked["studio"] == r.studio]
+        sources = set(rows["source"])
+        if sources == {"booking page"}:
+            st.caption("From the studio's booking page.")
+        elif sources == {"weekly timetable"}:
+            st.caption("Regular weekly timetable, which may be out of date. Check the "
+                       "studio's site.")
+        elif sources:
+            st.caption("From the studio's booking page. Dates beyond what it lists use "
+                       "the regular weekly timetable, which may be out of date.")
         if rows.empty:
-            st.write("No classes listed for this day.")
+            st.write("No classes listed for these dates.")
         else:
-            cols = ["time_label", "class_name", "instructor", "room", "duration", "price"]
+            cols = ["date_label", "time_label", "class_name", "instructor", "room", "duration",
+                    "price"]
             if rows["notes"].str.strip().any():  # only when there's something to say
                 cols.append("notes")
             st.dataframe(
-                rows[cols].rename(columns={"time_label": "time", "class_name": "class",
-                                           "room": "studio"}),
+                rows[cols].rename(columns={"date_label": "date", "time_label": "time",
+                                           "class_name": "class", "room": "studio"}),
                 hide_index=True, width="stretch",
             )
 
