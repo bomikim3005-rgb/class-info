@@ -75,18 +75,23 @@ classes = L.with_time_columns(classes)
 today = date.today()
 first_date, last_date = L.date_bounds(classes, today)
 with st.sidebar:
+    anytime = st.toggle("Anytime", help="Every date with classes, past and upcoming.")
     picked_range = st.date_input(
         "Dates", value=(today, today + timedelta(days=6)),  # the next 7 days
         min_value=min(first_date, today - timedelta(days=60)),
         max_value=max(last_date, today + timedelta(days=60)),
+        disabled=anytime,
         help="Defaults to the next 7 days, starting today. Pick a start and an end date.")
     name_query = st.text_input("Class name contains", placeholder="e.g. hip hop, house")
     hours = st.slider("Start time (hour)", 0, 23, (0, 23))
     who = st.text_input("Instructor contains")
 
-# While picking, the widget briefly returns only the start date.
-start_day, end_day = (picked_range if len(picked_range) == 2
-                      else (picked_range[0], picked_range[0]))
+if anytime:
+    start_day, end_day = first_date, last_date
+else:
+    # While picking, the widget briefly returns only the start date.
+    start_day, end_day = (picked_range if len(picked_range) == 2
+                          else (picked_range[0], picked_range[0]))
 picked = L.classes_between(classes, start_day, end_day, name_query, hours, who)
 summary = L.studio_summary(studios, picked)
 
@@ -199,8 +204,6 @@ for r in ordered.itertuples():
                if section_height(rows) > STUDIO_BOX_HEIGHT else st.container())
         with box:
             st.caption(f"{r.address} | {r.url}")
-            if r.notes:
-                st.caption(f"Note: {r.notes}")
             sources = set(rows["source"])
             if sources == {"booking page"}:
                 st.caption("From the studio's booking page.")
