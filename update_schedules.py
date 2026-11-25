@@ -1,11 +1,15 @@
 """Refresh classes.csv with each studio's current dated listings from its booking page.
 
-City Dance and In the Groove both publish classes through Acuity Scheduling pages
-that are built with JavaScript, so this renders each page in headless Google Chrome
-and reads the class list from the result.
+Studios publish classes through booking systems whose pages are built with
+JavaScript, so this renders each page in headless Google Chrome and reads the class
+list from the result:
 
-Acuity shows 15 classes at a time, so this presses the page's "More times" button
-to page forward until it has DAYS_AHEAD days of classes, as a visitor would.
+- Acuity Scheduling (City Dance, In the Groove): shows 15 classes at a time; this
+  presses the page's "More times" button to page forward, as a visitor would.
+- Momence (Rae Studios): its schedule plugin is meant to be embedded on any web
+  page, so this embeds it on a local page and presses its "Next Page" button.
+
+Either way, paging continues until it has DAYS_AHEAD days of classes.
 
 For each studio, this replaces its dated rows (date column filled) and leaves its
 weekly rows (date empty) alone; the app uses the weekly rows for days the listings
@@ -22,6 +26,7 @@ Run:
                                             # GOOGLE_APPLICATION_CREDENTIALS (key file)
 """
 import csv
+import http.server
 import json
 import os
 import re
@@ -29,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -51,10 +57,21 @@ RETENTION_DAYS = 60           # BigQuery sandbox maximum
 LOCAL_TZ = "America/Los_Angeles"
 MORE_BUTTON = 'button[aria-label="More times"]'
 
+# Acuity
 DATE_RE = re.compile(r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), "
                      r"(\w+) (\d+)(?:st|nd|rd|th), (\d{4})$")
 TIME_RE = re.compile(r"^\d{1,2}:\d{2} [AP]M$")
 LENGTH_RE = re.compile(r"^(.+?) @ \$(\d+(?:\.\d\d)?)$")
+
+# Momence
+MOMENCE_DATE_RE = re.compile(r"^(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day, \w+ \d{1,2}, \d{4}$")
+MOMENCE_NEXT = 'button[aria-label^="Next Page"]'
+MOMENCE_TYPES = {"CLASS", "WORKSHOP", "EVENT", "COURSE"}
+MOMENCE_EMBED = """<!doctype html><html><body>
+<div id="momence-plugin-host-schedule"></div>
+<script async type="module" host_id="{host_id}" teacher_ids="[]" location_ids="[]"
+        tag_ids="[]" src="https://momence.com/plugin/host-schedule/host-schedule.js"></script>
+</body></html>"""
 
 
 def parse_groove(title: str):
@@ -93,13 +110,20 @@ def parse_city_dance(title: str):
     return studio, name.strip(), instructor.strip(), room
 
 
+RAE_LOCATIONS = {  # Momence location -> studios.csv name; anything else is the studio
+    "UN Plaza Fitness Court": "Rae Studios - UN Plaza (free)",
+}
+
 SOURCES = [
-    {"name": "City Dance", "parse": parse_city_dance,
+    {"name": "City Dance", "kind": "acuity", "parse": parse_city_dance,
      "studios": {s for _, s in CITY_DANCE_LOCATIONS},
      "url": "https://app.acuityscheduling.com/schedule.php?owner=22968233&template=class"},
-    {"name": "In the Groove", "parse": parse_groove,
+    {"name": "In the Groove", "kind": "acuity", "parse": parse_groove,
      "studios": {"In the Groove Studios"},
      "url": "https://app.acuityscheduling.com/schedule.php?owner=30172961&template=class"},
+    {"name": "Rae Studios", "kind": "momence", "host_id": 51741,
+     "default_studio": "Rae Studios SF", "locations": RAE_LOCATIONS,
+     "studios": {"Rae Studios SF", *RAE_LOCATIONS.values()}},
 ]
 
 
@@ -155,29 +179,104 @@ class Browser:
         self.profile.cleanup()
 
 
-def booking_pages(url: str, until: date) -> list:
-    """Visible text of each page of listings, pressing "More times" until `until`."""
+def collect_pages(url: str, until: date, date_re, to_date, next_button: str) -> list:
+    """Visible text of each page of listings, pressing `next_button` until `until`."""
     browser = Browser()
+    has_dates = lambda: any(date_re.match(l) for l in lines(browser.text()))
     try:
         browser.call("Page.navigate", url=url)
-        if not browser.wait_for(lambda: any(TIME_RE.match(l) for l in lines(browser.text()))):
+        if not browser.wait_for(has_dates):
             return []
         pages = []
         while True:
             text = browser.text()
             pages.append(lines(text))
-            days = [listing_date(l) for l in pages[-1] if DATE_RE.match(l)]
+            days = [to_date(l) for l in pages[-1] if date_re.match(l)]
             if not days or max(days) > until:
                 break
-            clicked = browser.js(f"""(() => {{ const b = [...document.querySelectorAll('{MORE_BUTTON}')].pop();
-                                     if (!b) return false; b.click(); return true; }})()""")
+            clicked = browser.js(f"""(() => {{ const b = [...document.querySelectorAll('{next_button}')].pop();
+                                     if (!b || b.disabled) return false; b.click(); return true; }})()""")
             # Stop at the end of the schedule, or if the next page never loads.
             if not clicked or not browser.wait_for(lambda: browser.text() != text, timeout=20):
                 break
-            browser.wait_for(lambda: any(TIME_RE.match(l) for l in lines(browser.text())), 10)
+            browser.wait_for(has_dates, 10)
         return pages
     finally:
         browser.close()
+
+
+def momence_date(line: str) -> date:
+    return datetime.strptime(line, "%A, %B %d, %Y").date()
+
+
+class EmbedServer:
+    """Serves a local page embedding a Momence schedule plugin, on a free local port."""
+
+    def __init__(self, host_id: int):
+        page = MOMENCE_EMBED.format(host_id=int(host_id)).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(page)
+
+            def log_message(self, *args):  # keep the run's output quiet
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/"
+
+    def close(self):
+        self.server.shutdown()
+
+
+def minutes_text(minutes: int) -> str:
+    """90 -> '1 hour 30 min', matching how Acuity writes durations."""
+    hours, mins = divmod(minutes, 60)
+    parts = [f"{hours} hour{'s' if hours > 1 else ''}" if hours else "", f"{mins} min" if mins else ""]
+    return " ".join(p for p in parts if p)
+
+
+def parse_momence(lines: list, source: dict) -> list:
+    """Classes from a Momence plugin page. Each one reads:
+    CLASS, name, instructor, (bio and description), date, start, -, end, 'N min',
+    location, price, status ('Book now', 'Finished', 'Cancelled', ...)."""
+    rows = []
+    for k, line in enumerate(lines):
+        if not MOMENCE_DATE_RE.match(line) or k + 7 >= len(lines):
+            continue
+        start, dash, _end, length, location, price, status = lines[k + 1:k + 8]
+        if not TIME_RE.match(start) or dash != "-" or status.lower() == "cancelled":
+            continue
+        j = k - 1
+        while j >= 0 and lines[j].upper() not in MOMENCE_TYPES:
+            j -= 1
+        if j < 0 or j + 1 >= k:
+            continue
+        name = lines[j + 1]
+        # The instructor follows the name, unless the class has none listed.
+        maybe = lines[j + 2] if j + 2 < k else ""
+        instructor = (maybe if maybe and len(maybe) < 60 and ":" not in maybe
+                      and maybe not in ("Show bio", "Show more") else "")
+        day = momence_date(line)
+        minutes = re.match(r"^(\d+) min$", length)
+        studio = source["locations"].get(location, source["default_studio"])
+        rows.append({
+            "studio": studio,
+            "weekday": day.strftime("%a"),
+            "start": datetime.strptime(start, "%I:%M %p").strftime("%H:%M"),
+            "class_name": name,
+            "instructor": instructor,
+            "room": "" if location in source["locations"] else location,
+            "duration": minutes_text(int(minutes[1])) if minutes else "",
+            "price": price if price.startswith("$") or price.lower() == "free" else "",
+            "notes": "",
+            "date": day.isoformat(),
+        })
+    return rows
 
 
 def lines(text: str) -> list:
@@ -222,10 +321,19 @@ def parse(lines: list, parse_title) -> tuple:
 def scrape(source: dict, until: date) -> list:
     """All of a source's classes from today through `until`, each listed once."""
     rows = {}
-    for page in booking_pages(source["url"], until):
-        for r in parse(page, source["parse"])[0]:
-            if r["date"] <= until.isoformat():
-                rows[(r["studio"], r["date"], r["start"], r["class_name"])] = r
+    if source["kind"] == "momence":
+        server = EmbedServer(source["host_id"])
+        try:
+            pages = collect_pages(server.url, until, MOMENCE_DATE_RE, momence_date, MOMENCE_NEXT)
+        finally:
+            server.close()
+        found = [r for page in pages for r in parse_momence(page, source)]
+    else:
+        pages = collect_pages(source["url"], until, DATE_RE, listing_date, MORE_BUTTON)
+        found = [r for page in pages for r in parse(page, source["parse"])[0]]
+    for r in found:
+        if r["date"] <= until.isoformat():
+            rows[(r["studio"], r["date"], r["start"], r["class_name"])] = r
     return sorted(rows.values(), key=lambda r: (r["date"], r["start"], r["studio"]))
 
 

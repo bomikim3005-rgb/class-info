@@ -8,9 +8,10 @@ A Streamlit map of drop-in dance classes at Bay Area studios. Pick a date to see
 |---|---|
 | City Dance (60 Brady, Annex) | Live: City Dance's Acuity booking page |
 | In the Groove Studios | Live: In the Groove's Acuity booking page |
+| Rae Studios SF (Union Square) and its free UN Plaza classes | Live: Rae's Momence schedule plugin |
 | City Ballet (City Dance) | Weekly timetable in `classes.csv` (not on the booking page) |
 
-`update_schedules.py` opens each booking page in headless Chrome and presses its **More times** button to page through the next 60 days, as a visitor would. Class names are kept as each studio writes them.
+`update_schedules.py` opens each booking page in headless Chrome and pages through the next 60 days, as a visitor would. On Acuity pages it presses **More times**. Momence's schedule plugin is meant to be embedded on any site, so the script embeds it on a local page and presses **Next Page**. Class names are kept as each studio writes them. Classes marked cancelled on Momence are skipped.
 
 ## Data
 
