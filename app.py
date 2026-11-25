@@ -51,6 +51,7 @@ def load_bigquery(project: str, key: str):
 studios, classes = load_csv(tuple(p.stat().st_mtime for p in
                                   (Path(L.BASE) / "studios.csv", Path(L.BASE) / "classes.csv")))
 source_note = "Classes from classes.csv."
+from_bigquery = False
 project, key = secret("BQ_PROJECT"), secret("GCP_SA_KEY")
 if project and key:
     try:
@@ -59,6 +60,7 @@ if project and key:
                             ignore_index=True)
         source_note = ("Classes from the studios' booking pages, collected daily into "
                        "BigQuery (past ~60 days and next ~60 days).")
+        from_bigquery = True
     except Exception as e:  # show the kind of failure, never credentials
         st.warning(f"Couldn't load classes from BigQuery ({type(e).__name__}); "
                    "showing classes.csv instead.")
@@ -69,10 +71,10 @@ today = date.today()
 first_date, last_date = L.date_bounds(classes, today)
 with st.sidebar:
     picked_range = st.date_input(
-        "Dates", value=(first_date, last_date),
+        "Dates", value=(today, today + timedelta(days=6)),  # the next 7 days
         min_value=min(first_date, today - timedelta(days=60)),
         max_value=max(last_date, today + timedelta(days=60)),
-        help="Defaults to every date with classes. Pick a start and an end date.")
+        help="Defaults to the next 7 days, starting today. Pick a start and an end date.")
     name_query = st.text_input("Class name contains", placeholder="e.g. hip hop, house")
     hours = st.slider("Start time (hour)", 0, 23, (0, 23))
     who = st.text_input("Instructor contains")
@@ -82,6 +84,33 @@ start_day, end_day = (picked_range if len(picked_range) == 2
                       else (picked_range[0], picked_range[0]))
 picked = L.classes_between(classes, start_day, end_day, name_query, hours, who)
 summary = L.studio_summary(studios, picked)
+
+# Rows for classes that have already happened: greyed out, in italics.
+PAST_STYLE = "background-color: rgba(128, 128, 128, 0.22); color: #9a9a9a; font-style: italic"
+
+
+def styled(table: pd.DataFrame, past: pd.Series):
+    return table.style.apply(lambda row: [PAST_STYLE if past.loc[row.name] else ""] * len(row),
+                             axis=1)
+
+
+st.markdown("#### Newly added classes")
+if not from_bigquery:
+    st.caption("Lists upcoming classes that weren't in yesterday's daily run. "
+               "Needs the BigQuery history, so it shows once the app reads from BigQuery.")
+else:
+    fresh = L.new_classes(classes)
+    if fresh.empty:
+        st.caption("No new classes since yesterday's run.")
+    else:
+        one = len(fresh) == 1
+        st.caption(f"{len(fresh)} upcoming class{'' if one else 'es'} that "
+                   f"{'was' if one else 'were'}n't in yesterday's run.")
+        st.dataframe(
+            fresh[["date_label", "time_label", "studio", "class_name", "instructor", "price"]]
+            .rename(columns={"date_label": "date", "time_label": "time", "class_name": "class"}),
+            hide_index=True, width="stretch", height=min(250, (len(fresh) + 1) * 35 + 3),
+        )
 
 st.subheader(f"{len(picked):,} class{'' if len(picked) == 1 else 'es'}")
 
@@ -161,15 +190,18 @@ for r in summary.sort_values("n_classes", ascending=False).itertuples():
             cols = ["time_label", "class_name", "instructor", "room", "duration", "price"]
             if rows["notes"].str.strip().any():  # only when there's something to say
                 cols.append("notes")
-            # One table per date, under that date's heading. Each table is tall enough
-            # for all its rows, so only the section scrolls, not the tables inside it.
+            # One table per date, under that date's heading. st.table (a plain HTML
+            # table) shows every row, so only the section scrolls, and unlike
+            # st.dataframe it applies the italic style for past classes.
             for _, day_rows in rows.groupby("date", sort=True):
                 st.markdown(f"**{day_rows['date_label'].iloc[0]}** · {len(day_rows)} "
                             f"class{'' if len(day_rows) == 1 else 'es'}")
-                st.dataframe(
-                    day_rows[cols].rename(columns={"time_label": "time", "class_name": "class",
-                                                   "room": "studio"}),
-                    hide_index=True, width="stretch", height=(len(day_rows) + 1) * ROW_PX + 3,
+                st.table(
+                    styled(day_rows[cols].rename(columns={"time_label": "time",
+                                                          "class_name": "class",
+                                                          "room": "studio"}),
+                           day_rows["is_past"]),
+                    hide_index=True,
                 )
 
 st.caption("Schedules come from the CSV files and can be out of date. Check the studio site before going.")

@@ -1,5 +1,6 @@
 """Data loading and filtering for the Bay Area dance class map."""
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import pandas as pd
@@ -8,7 +9,8 @@ BASE = Path(__file__).parent
 
 
 CLASS_COLUMNS = ["studio", "weekday", "start", "class_name", "instructor", "room",
-                 "duration", "price", "notes", "date"]
+                 "duration", "price", "notes", "date", "is_new"]
+LOCAL_TZ = "America/Los_Angeles"
 
 # Dated classes from the BigQuery view update_schedules.py --bigquery maintains,
 # renamed to match classes.csv.
@@ -16,7 +18,8 @@ BIGQUERY_SQL = """
 select studio, weekday, start_time as start, class_name,
        coalesce(instructor, '') as instructor, coalesce(room, '') as room,
        coalesce(duration, '') as duration, coalesce(price, '') as price,
-       '' as notes, format_date('%Y-%m-%d', class_date) as date
+       '' as notes, format_date('%Y-%m-%d', class_date) as date,
+       if(is_new, '1', '') as is_new
 from `{project}.class_info.classes`
 """
 
@@ -59,6 +62,7 @@ def classes_between(classes: pd.DataFrame, first: date, last: date, name_query: 
     dated = classes[classes["date"] != ""]
     weekly = classes[classes["date"] == ""]
     span = dated.groupby("studio")["date"].agg(["min", "max"])
+    now = datetime.now(ZoneInfo(LOCAL_TZ)).strftime("%Y-%m-%d %H:%M")
     frames = [dated[(dated["date"] >= first.isoformat()) & (dated["date"] <= last.isoformat())]
               .assign(source="booking page")]
     if not weekly.empty:
@@ -75,6 +79,16 @@ def classes_between(classes: pd.DataFrame, first: date, last: date, name_query: 
     df = df[(df["hour"] >= hour_range[0]) & (df["hour"] <= hour_range[1])]
     if instructor_query.strip():
         df = df[df["instructor"].str.contains(instructor_query.strip(), case=False, regex=False)]
+    df = df.assign(date_label=pd.to_datetime(df["date"]).dt.strftime("%a, %b %-d"),
+                   # Started already (local time); "YYYY-MM-DD HH:MM" strings sort as times.
+                   is_past=(df["date"] + " " + df["start"]) < now)
+    return df.sort_values(["date", "start", "studio"]).reset_index(drop=True)
+
+
+def new_classes(classes: pd.DataFrame) -> pd.DataFrame:
+    """Upcoming classes the latest daily run saw for the first time."""
+    now = datetime.now(ZoneInfo(LOCAL_TZ)).strftime("%Y-%m-%d %H:%M")
+    df = classes[(classes["is_new"] == "1") & ((classes["date"] + " " + classes["start"]) >= now)]
     df = df.assign(date_label=pd.to_datetime(df["date"]).dt.strftime("%a, %b %-d"))
     return df.sort_values(["date", "start", "studio"]).reset_index(drop=True)
 

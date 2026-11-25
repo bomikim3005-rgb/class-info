@@ -18,9 +18,9 @@ A Streamlit map of drop-in dance classes at Bay Area studios. Pick a date to see
 - **`studios.csv`** has one row per studio: name, address, coordinates, website and notes.
 - **`classes.csv`** has weekly classes (empty `date`), plus dated classes when you run the scraper locally.
 - **BigQuery `class_info.class_listings`** is append-only, with one row per class per daily run. It's partitioned by class date, and each partition expires 60 days after the class (the BigQuery sandbox maximum).
-- **BigQuery view `class_info.classes`** holds the latest version of each class. A future class that disappears from its booking page (likely cancelled) is left out. Classes that already happened are kept as they were last seen.
+- **BigQuery view `class_info.classes`** has one row per class. Past classes are frozen: the daily run never loads a class that has already started, and each one keeps the version saved before it began. A class removed from its booking page before it happened (likely cancelled) is left out. Future classes come from the latest run. `is_new` marks classes the latest run saw for the first time (ones that only entered the 60-day window don't count).
 
-For each studio and date, the app shows dated classes when there are any for that studio's covered range, and the weekly timetable otherwise.
+The app shows past classes in grey italics, and lists newly added classes at the top. For each studio and date, the app shows dated classes when there are any for that studio's covered range, and the weekly timetable otherwise.
 
 ## Run locally
 

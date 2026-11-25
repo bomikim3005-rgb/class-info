@@ -38,6 +38,7 @@ import threading
 import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import websocket  # websocket-client: talks to Chrome's DevTools protocol
@@ -337,35 +338,70 @@ def scrape(source: dict, until: date) -> list:
     return sorted(rows.values(), key=lambda r: (r["date"], r["start"], r["studio"]))
 
 
-# The latest version of each class. A future class that's missing from its studio's
-# latest run was taken off the booking page (likely cancelled), so it's left out.
-# Classes stop being listed once they start, so a class from before the latest run's
-# date is kept as it was last seen.
+# One row per class: the version to show.
+#
+# - Past classes are frozen: only rows scraped before a class started count (and
+#   main() never loads a class that has already started), so later runs can't
+#   change them. A class shows up as past only if it was still listed in the last
+#   run before it started; one removed before then was cancelled.
+# - Future classes come from their studio's latest run; one missing from it was
+#   taken off the booking page (likely cancelled) and is left out.
+# - is_new: first seen in the latest run, so it wasn't in the previous (yesterday's)
+#   run. Classes that only entered the DAYS_AHEAD window since then don't count.
 VIEW_SQL = """
 create or replace view `{dataset}.{view}` as
-with latest_run as (
-    select source, max(scraped_at) as run_at
+with listings as (
+    select
+        *,
+        timestamp(datetime(class_date, parse_time('%H:%M', start_time)), '{tz}')
+            as class_start
     from `{dataset}.{table}`
-    group by source
 ),
-ranked as (
+runs as (
+    select
+        source,
+        scraped_at as run_at,
+        lag(scraped_at) over (partition by source order by scraped_at) as prev_run_at,
+        row_number() over (partition by source order by scraped_at desc) as recency
+    from (select distinct source, scraped_at from listings)
+),
+before_start as (
     select
         *,
         min(scraped_at) over (partition by studio, class_date, start_time, class_name)
             as first_seen_at,
         row_number() over (partition by studio, class_date, start_time, class_name
                            order by scraped_at desc) as rn
-    from `{dataset}.{table}`
+    from listings
+    where scraped_at <= class_start
+),
+latest as (
+    select * from before_start where rn = 1
+),
+expected_run as (  -- the last run before the class started (the latest run, if it hasn't)
+    select l.studio, l.class_date, l.start_time, l.class_name, max(r.run_at) as run_at
+    from latest as l
+    inner join runs as r on r.source = l.source and r.run_at <= l.class_start
+    group by l.studio, l.class_date, l.start_time, l.class_name
+),
+newest_run as (
+    select source, run_at, prev_run_at from runs where recency = 1
 )
 select
-    r.source, r.studio, r.class_date, r.weekday, r.start_time, r.class_name,
-    r.instructor, r.room, r.duration, r.price,
-    r.first_seen_at, r.scraped_at as last_seen_at
-from ranked as r
-inner join latest_run as l on r.source = l.source
-where r.rn = 1
-  and (r.scraped_at = l.run_at
-       or r.class_date < date(l.run_at, '{tz}'))
+    l.source, l.studio, l.class_date, l.weekday, l.start_time, l.class_name,
+    l.instructor, l.room, l.duration, l.price, l.class_start,
+    l.first_seen_at, l.scraped_at as last_seen_at,
+    l.class_start < current_timestamp() as is_past,
+    coalesce(n.prev_run_at is not null
+             and l.first_seen_at = n.run_at
+             and l.class_date <= date_add(date(n.prev_run_at, '{tz}'),
+                                          interval {days} day), false) as is_new
+from latest as l
+inner join expected_run as e
+    on l.studio = e.studio and l.class_date = e.class_date
+   and l.start_time = e.start_time and l.class_name = e.class_name
+left join newest_run as n on l.source = n.source
+where l.scraped_at = e.run_at
 """
 
 
@@ -405,7 +441,7 @@ def load_to_bigquery(rows: list, project: str) -> None:
         ))
     job.result()  # wait; raises if the load failed
     client.query(VIEW_SQL.format(dataset=f"{project}.{BQ_DATASET}", table=BQ_TABLE,
-                                 view=BQ_VIEW, tz=LOCAL_TZ)).result()
+                                 view=BQ_VIEW, tz=LOCAL_TZ, days=DAYS_AHEAD)).result()
     try:
         table = client.get_table(dest)
         table.expires = datetime.now(timezone.utc) + timedelta(days=RETENTION_DAYS - 1)
@@ -442,12 +478,18 @@ def main():
                   "nothing saved for it this run.")
             continue
         new_rows += rows
-        bq_rows += bigquery_rows(source, rows, scraped_at)
+        # Classes that have already started (e.g. "Finished" ones on Momence) are
+        # past: never load them, so a past class keeps the version saved before it.
+        now_local = scraped_at.astimezone(ZoneInfo(LOCAL_TZ)).strftime("%Y-%m-%d %H:%M")
+        bq_rows += bigquery_rows(source, [r for r in rows if f"{r['date']} {r['start']}" > now_local],
+                                 scraped_at)
         refreshed |= source["studios"]
         print(f"{source['name']}: {len(rows)} classes, {rows[0]['date']} to {rows[-1]['date']}.")
     if not new_rows:
         sys.exit("No classes found on any booking page.")
     if to_bigquery:
+        if not bq_rows:
+            sys.exit("No upcoming classes to load.")
         load_to_bigquery(bq_rows, project)
         return
     if "--dry-run" in sys.argv:
