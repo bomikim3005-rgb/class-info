@@ -3,6 +3,8 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
+import re
+
 import pandas as pd
 
 BASE = Path(__file__).parent
@@ -31,6 +33,35 @@ def load_data():
         if col not in classes.columns:
             classes[col] = ""
     return studios, classes[CLASS_COLUMNS]
+
+
+INSTAGRAM_HANDLE = re.compile(r"^[A-Za-z0-9_.]{1,30}$")
+
+# Studio sections are listed in this order (by name prefix), then as in studios.csv.
+STUDIO_ORDER = ["In the Groove", "City Dance", "City Ballet", "Rae Studios"]
+
+
+def load_instructors() -> dict:
+    """{instructor name, lowercased: Instagram handle} from instructors.csv.
+
+    The handle may be written as "name", "@name" or an instagram.com link; anything
+    that isn't a valid handle is ignored, so it can't become an odd link.
+    """
+    path = BASE / "instructors.csv"
+    if not path.exists():
+        return {}
+    handles = {}
+    for row in pd.read_csv(path, dtype=str).fillna("").itertuples():
+        handle = re.sub(r"^(https?://)?(www\.)?instagram\.com/", "", row.instagram.strip())
+        handle = handle.split("?")[0].strip("/").lstrip("@")
+        if row.instructor.strip() and INSTAGRAM_HANDLE.match(handle):
+            handles[row.instructor.strip().lower()] = handle
+    return handles
+
+
+def studio_rank(studio: str) -> int:
+    return next((i for i, prefix in enumerate(STUDIO_ORDER) if studio.startswith(prefix)),
+                len(STUDIO_ORDER))
 
 
 def load_bigquery_classes(project: str, key_info: dict) -> pd.DataFrame:

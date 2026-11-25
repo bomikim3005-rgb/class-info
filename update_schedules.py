@@ -108,6 +108,9 @@ def parse_city_dance(title: str):
         print(f"  skipped (unknown City Dance location {where!r}): {title}", file=sys.stderr)
         return None
     room = where.rpartition(" | ")[2].strip().title() if " | " in where else ""
+    # Show tickets put the venue where the instructor goes ("... | 60 BRADY").
+    if any(key in instructor.upper() for key, _ in CITY_DANCE_LOCATIONS):
+        instructor = ""
     return studio, name.strip(), instructor.strip(), room
 
 
@@ -346,8 +349,9 @@ def scrape(source: dict, until: date) -> list:
 #   run before it started; one removed before then was cancelled.
 # - Future classes come from their studio's latest run; one missing from it was
 #   taken off the booking page (likely cancelled) and is left out.
-# - is_new: first seen in the latest run, so it wasn't in the previous (yesterday's)
-#   run. Classes that only entered the DAYS_AHEAD window since then don't count.
+# - is_new: first seen within the last two days of runs (today's or yesterday's), and
+#   missing from the run before that. Classes that only entered the DAYS_AHEAD window
+#   don't count, and neither does anything in a studio's very first run.
 VIEW_SQL = """
 create or replace view `{dataset}.{view}` as
 with listings as (
@@ -361,7 +365,6 @@ runs as (
     select
         source,
         scraped_at as run_at,
-        lag(scraped_at) over (partition by source order by scraped_at) as prev_run_at,
         row_number() over (partition by source order by scraped_at desc) as recency
     from (select distinct source, scraped_at from listings)
 ),
@@ -385,22 +388,32 @@ expected_run as (  -- the last run before the class started (the latest run, if 
     group by l.studio, l.class_date, l.start_time, l.class_name
 ),
 newest_run as (
-    select source, run_at, prev_run_at from runs where recency = 1
+    select source, run_at from runs where recency = 1
+),
+prior_run as (  -- the last run before the one that first saw the class
+    select l.studio, l.class_date, l.start_time, l.class_name, max(r.run_at) as run_at
+    from latest as l
+    inner join runs as r on r.source = l.source and r.run_at < l.first_seen_at
+    group by l.studio, l.class_date, l.start_time, l.class_name
 )
 select
     l.source, l.studio, l.class_date, l.weekday, l.start_time, l.class_name,
     l.instructor, l.room, l.duration, l.price, l.class_start,
     l.first_seen_at, l.scraped_at as last_seen_at,
     l.class_start < current_timestamp() as is_past,
-    coalesce(n.prev_run_at is not null
-             and l.first_seen_at = n.run_at
-             and l.class_date <= date_add(date(n.prev_run_at, '{tz}'),
+    coalesce(p.run_at is not null
+             -- 36 hours: today's and yesterday's daily runs, with room for GitHub delays
+             and l.first_seen_at > timestamp_sub(n.run_at, interval 36 hour)
+             and l.class_date <= date_add(date(p.run_at, '{tz}'),
                                           interval {days} day), false) as is_new
 from latest as l
 inner join expected_run as e
     on l.studio = e.studio and l.class_date = e.class_date
    and l.start_time = e.start_time and l.class_name = e.class_name
 left join newest_run as n on l.source = n.source
+left join prior_run as p
+    on l.studio = p.studio and l.class_date = p.class_date
+   and l.start_time = p.start_time and l.class_name = p.class_name
 where l.scraped_at = e.run_at
 """
 
