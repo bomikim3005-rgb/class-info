@@ -124,33 +124,52 @@ st.pydeck_chart(pdk.Deck(
                        "maxWidth": "260px", "fontSize": "13px"}},
 ))
 
+STUDIO_BOX_HEIGHT = 680  # px; a studio's section scrolls inside this when it's taller
+ROW_PX = 35               # st.dataframe row height
+
+
+def section_height(rows) -> int:
+    """Rough pixel height of a studio's section: captions, then per date a heading
+    and a table showing all its rows."""
+    per_day = rows.groupby("date").size()
+    return 120 + int(sum(45 + (n + 1) * ROW_PX + 20 for n in per_day))
+
+
 for r in summary.sort_values("n_classes", ascending=False).itertuples():
+    rows = picked[picked["studio"] == r.studio]
     with st.expander(f"{r.studio} ({r.n_classes} class{'' if r.n_classes == 1 else 'es'})",
                      expanded=r.n_classes > 0):
-        st.caption(f"{r.address} | {r.url}")
-        if r.notes:
-            st.caption(f"Note: {r.notes}")
-        rows = picked[picked["studio"] == r.studio]
-        sources = set(rows["source"])
-        if sources == {"booking page"}:
-            st.caption("From the studio's booking page.")
-        elif sources == {"weekly timetable"}:
-            st.caption("Regular weekly timetable, which may be out of date. Check the "
-                       "studio's site.")
-        elif sources:
-            st.caption("From the studio's booking page. Dates beyond what it lists use "
-                       "the regular weekly timetable, which may be out of date.")
-        if rows.empty:
-            st.write("No classes listed for these dates.")
-        else:
-            cols = ["date_label", "time_label", "class_name", "instructor", "room", "duration",
-                    "price"]
+        # Fixed height only when the section would be taller; short ones keep their size.
+        box = (st.container(height=STUDIO_BOX_HEIGHT, border=False)
+               if section_height(rows) > STUDIO_BOX_HEIGHT else st.container())
+        with box:
+            st.caption(f"{r.address} | {r.url}")
+            if r.notes:
+                st.caption(f"Note: {r.notes}")
+            sources = set(rows["source"])
+            if sources == {"booking page"}:
+                st.caption("From the studio's booking page.")
+            elif sources == {"weekly timetable"}:
+                st.caption("Regular weekly timetable, which may be out of date. Check the "
+                           "studio's site.")
+            elif sources:
+                st.caption("From the studio's booking page. Dates beyond what it lists use "
+                           "the regular weekly timetable, which may be out of date.")
+            if rows.empty:
+                st.write("No classes listed for these dates.")
+                continue
+            cols = ["time_label", "class_name", "instructor", "room", "duration", "price"]
             if rows["notes"].str.strip().any():  # only when there's something to say
                 cols.append("notes")
-            st.dataframe(
-                rows[cols].rename(columns={"date_label": "date", "time_label": "time",
-                                           "class_name": "class", "room": "studio"}),
-                hide_index=True, width="stretch",
-            )
+            # One table per date, under that date's heading. Each table is tall enough
+            # for all its rows, so only the section scrolls, not the tables inside it.
+            for _, day_rows in rows.groupby("date", sort=True):
+                st.markdown(f"**{day_rows['date_label'].iloc[0]}** · {len(day_rows)} "
+                            f"class{'' if len(day_rows) == 1 else 'es'}")
+                st.dataframe(
+                    day_rows[cols].rename(columns={"time_label": "time", "class_name": "class",
+                                                   "room": "studio"}),
+                    hide_index=True, width="stretch", height=(len(day_rows) + 1) * ROW_PX + 3,
+                )
 
 st.caption("Schedules come from the CSV files and can be out of date. Check the studio site before going.")
