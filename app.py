@@ -203,6 +203,8 @@ for r in ordered.itertuples():
         box = (st.container(height=STUDIO_BOX_HEIGHT, border=False)
                if section_height(rows) > STUDIO_BOX_HEIGHT else st.container())
         with box:
+            if isinstance(r.booking_url, str) and r.booking_url:
+                st.link_button("Book a class ↗", r.booking_url)
             st.caption(f"{r.address} | {r.url}")
             sources = set(rows["source"])
             if sources == {"booking page"}:
