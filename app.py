@@ -70,6 +70,10 @@ if project and key:
     except Exception as e:  # show the kind of failure, never credentials
         st.warning(f"Couldn't load classes from BigQuery ({type(e).__name__}); "
                    "showing classes.csv instead.")
+# Cached results can come from before a column was added (the caches only reload when
+# the data files change), so fill in any missing columns rather than relying on them.
+for col in L.CLASS_COLUMNS:
+    classes[col] = classes[col].fillna("") if col in classes else ""
 classes = L.with_time_columns(classes)
 
 today = date.today()
