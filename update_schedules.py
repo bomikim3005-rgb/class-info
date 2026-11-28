@@ -345,13 +345,20 @@ def scrape(source: dict, until: date) -> list:
 #
 # - Past classes are frozen: only rows scraped before a class started count (and
 #   main() never loads a class that has already started), so later runs can't
-#   change them. A class shows up as past only if it was still listed in the last
-#   run before it started; one removed before then was cancelled.
-# - Future classes come from their studio's latest run; one missing from it was
-#   taken off the booking page (likely cancelled) and is left out.
+#   change them.
+# - Cancelled classes: each run saves a studio's whole schedule, so a class that a
+#   run listed and a later run (before the class started) didn't is cancelled.
+#   Momence's own "Cancelled" classes are skipped by the scraper, so they drop out
+#   the same way. status is 'cancelled' and cancelled_at is the first run that no
+#   longer listed it; that run must reach the class's date, so a run whose paging
+#   stopped early can't cancel classes past where it stopped. A class that comes
+#   back in a later run is scheduled again. Classes are matched on studio, date,
+#   start time and name, so a renamed or moved class shows as cancelled plus new.
+# - Everything else is 'scheduled', in the version from the last run that listed it.
 # - is_new: first seen within the last two days of runs (today's or yesterday's), and
 #   missing from the run before that. Classes that only entered the DAYS_AHEAD window
-#   don't count, and neither does anything in a studio's very first run.
+#   don't count, and neither does anything in a studio's very first run or anything
+#   cancelled.
 VIEW_SQL = """
 create or replace view `{dataset}.{view}` as
 with listings as (
@@ -361,12 +368,14 @@ with listings as (
             as class_start
     from `{dataset}.{table}`
 ),
-runs as (
+runs as (  -- one row per studio source per daily run
     select
         source,
         scraped_at as run_at,
+        max(class_date) as last_date,  -- how far that run's listings reached
         row_number() over (partition by source order by scraped_at desc) as recency
-    from (select distinct source, scraped_at from listings)
+    from listings
+    group by source, scraped_at
 ),
 before_start as (
     select
@@ -381,10 +390,12 @@ before_start as (
 latest as (
     select * from before_start where rn = 1
 ),
-expected_run as (  -- the last run before the class started (the latest run, if it hasn't)
-    select l.studio, l.class_date, l.start_time, l.class_name, max(r.run_at) as run_at
+missed_run as (  -- the first run after the class was last listed that left it out
+    select l.studio, l.class_date, l.start_time, l.class_name, min(r.run_at) as run_at
     from latest as l
-    inner join runs as r on r.source = l.source and r.run_at <= l.class_start
+    inner join runs as r
+        on r.source = l.source and r.run_at > l.scraped_at
+       and r.run_at <= l.class_start and r.last_date >= l.class_date
     group by l.studio, l.class_date, l.start_time, l.class_name
 ),
 newest_run as (
@@ -401,20 +412,21 @@ select
     l.instructor, l.room, l.duration, l.price, l.class_start,
     l.first_seen_at, l.scraped_at as last_seen_at,
     l.class_start < current_timestamp() as is_past,
-    coalesce(p.run_at is not null
+    if(m.run_at is null, 'scheduled', 'cancelled') as status,
+    m.run_at as cancelled_at,
+    coalesce(m.run_at is null and p.run_at is not null
              -- 36 hours: today's and yesterday's daily runs, with room for GitHub delays
              and l.first_seen_at > timestamp_sub(n.run_at, interval 36 hour)
              and l.class_date <= date_add(date(p.run_at, '{tz}'),
                                           interval {days} day), false) as is_new
 from latest as l
-inner join expected_run as e
-    on l.studio = e.studio and l.class_date = e.class_date
-   and l.start_time = e.start_time and l.class_name = e.class_name
+left join missed_run as m
+    on l.studio = m.studio and l.class_date = m.class_date
+   and l.start_time = m.start_time and l.class_name = m.class_name
 left join newest_run as n on l.source = n.source
 left join prior_run as p
     on l.studio = p.studio and l.class_date = p.class_date
    and l.start_time = p.start_time and l.class_name = p.class_name
-where l.scraped_at = e.run_at
 """
 
 

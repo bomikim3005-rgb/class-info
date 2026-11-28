@@ -11,7 +11,7 @@ BASE = Path(__file__).parent
 
 
 CLASS_COLUMNS = ["studio", "weekday", "start", "class_name", "instructor", "room",
-                 "duration", "price", "notes", "date", "is_new"]
+                 "duration", "price", "notes", "date", "is_new", "status", "cancelled_at"]
 LOCAL_TZ = "America/Los_Angeles"
 
 # Dated classes from the BigQuery view update_schedules.py --bigquery maintains,
@@ -21,7 +21,10 @@ select studio, weekday, start_time as start, class_name,
        coalesce(instructor, '') as instructor, coalesce(room, '') as room,
        coalesce(duration, '') as duration, coalesce(price, '') as price,
        '' as notes, format_date('%Y-%m-%d', class_date) as date,
-       if(is_new, '1', '') as is_new
+       if(is_new, '1', '') as is_new,
+       if(status = 'cancelled', 'cancelled', '') as status,
+       coalesce(format_timestamp('%Y-%m-%d %H:%M', cancelled_at, 'America/Los_Angeles'), '')
+           as cancelled_at
 from `{project}.class_info.classes`
 """
 
@@ -159,6 +162,7 @@ def studio_summary(studios: pd.DataFrame, picked: pd.DataFrame) -> pd.DataFrame:
             lines.append("(includes the regular weekly timetable, which may be out of date)")
         return "\n".join(lines)
 
+    picked = picked[picked["status"] != "cancelled"]  # the map counts classes still on
     out["n_classes"] = out["studio"].map(picked["studio"].value_counts()).fillna(0).astype(int)
     out["tooltip"] = out["studio"].apply(tip)
     # teal when classes exist, gray when none
