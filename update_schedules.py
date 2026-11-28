@@ -350,10 +350,13 @@ def scrape(source: dict, until: date) -> list:
 #   run listed and a later run (before the class started) didn't is cancelled.
 #   Momence's own "Cancelled" classes are skipped by the scraper, so they drop out
 #   the same way. status is 'cancelled' and cancelled_at is the first run that no
-#   longer listed it; that run must reach the class's date, so a run whose paging
-#   stopped early can't cancel classes past where it stopped. A class that comes
-#   back in a later run is scheduled again. Classes are matched on studio, date,
-#   start time and name, so a renamed or moved class shows as cancelled plus new.
+#   longer listed it. That run's listings must span the class's day: a run whose
+#   paging stopped early can't cancel classes past where it stopped, and an evening
+#   Momence run, which no longer shows the rest of that day's classes and starts at
+#   tomorrow, can't cancel tonight's. A class whose instructor, studio and
+#   date are listed in that run with the same name or the same start time was
+#   renamed or moved, not cancelled: it's left out, as its new version is listed.
+#   A class that comes back later is scheduled again.
 # - Everything else is 'scheduled', in the version from the last run that listed it.
 # - is_new: first seen within the last two days of runs (today's or yesterday's), and
 #   missing from the run before that. Classes that only entered the DAYS_AHEAD window
@@ -372,7 +375,8 @@ runs as (  -- one row per studio source per daily run
     select
         source,
         scraped_at as run_at,
-        max(class_date) as last_date,  -- how far that run's listings reached
+        min(class_date) as first_date,  -- the run's listings span these two days
+        max(class_date) as last_date,
         row_number() over (partition by source order by scraped_at desc) as recency
     from listings
     group by source, scraped_at
@@ -390,13 +394,26 @@ before_start as (
 latest as (
     select * from before_start where rn = 1
 ),
-missed_run as (  -- the first run after the class was last listed that left it out
-    select l.studio, l.class_date, l.start_time, l.class_name, min(r.run_at) as run_at
+first_missed as (  -- the first run after the class was last listed that left it out
+    select l.source, l.studio, l.class_date, l.start_time, l.class_name, l.instructor,
+           min(r.run_at) as run_at
     from latest as l
     inner join runs as r
         on r.source = l.source and r.run_at > l.scraped_at
-       and r.run_at <= l.class_start and r.last_date >= l.class_date
-    group by l.studio, l.class_date, l.start_time, l.class_name
+       and r.run_at <= l.class_start
+       and l.class_date between r.first_date and r.last_date
+    group by l.source, l.studio, l.class_date, l.start_time, l.class_name, l.instructor
+),
+missed_run as (
+    select
+        m.*,
+        exists (  -- renamed or moved: same teacher, studio and day, same name or time
+            select 1 from listings as x
+            where x.scraped_at = m.run_at and x.source = m.source and x.studio = m.studio
+              and x.class_date = m.class_date and x.instructor = m.instructor
+              and (x.class_name = m.class_name or x.start_time = m.start_time)
+        ) as replaced
+    from first_missed as m
 ),
 newest_run as (
     select source, run_at from runs where recency = 1
@@ -427,6 +444,7 @@ left join newest_run as n on l.source = n.source
 left join prior_run as p
     on l.studio = p.studio and l.class_date = p.class_date
    and l.start_time = p.start_time and l.class_name = p.class_name
+where not coalesce(m.replaced, false)  -- the new version is listed instead
 """
 
 

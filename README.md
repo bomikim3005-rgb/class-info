@@ -51,4 +51,4 @@ On Streamlit Community Cloud, set main file `app.py` and Python 3.12, and add `B
 - **Live data reaches only what booking pages publish.** Studios using Mindbody or Vagaro block automated browsers, so they can't be added this way.
 - **The scraper reads the page as displayed.** If Acuity changes its layout, the scraper finds no classes, logs a warning and saves nothing for that studio, rather than saving bad data.
 - **History is limited to 60 days** while the project runs on the BigQuery sandbox.
-- **Cancellations are inferred.** Acuity doesn't show cancelled classes; they just disappear. Classes are matched on studio, date, start time and name, so a class that's renamed or moved to another time shows as cancelled, with the new version listed as a new class.
+- **Cancellations are inferred.** Acuity doesn't show cancelled classes; they just disappear. A class isn't counted as cancelled when the same instructor has a class at the same studio that day with the same name or start time (it was renamed or moved). A class whose name and time both change, or that moves to another day, still shows as cancelled, with the new version listed as a new class.
