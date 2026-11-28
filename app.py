@@ -103,6 +103,8 @@ table.classes th, table.classes td {text-align: left; padding: 0.4rem 0.6rem;
     border-bottom: 1px solid rgba(128, 128, 128, 0.25)}
 table.classes th {font-weight: 500; opacity: 0.7}
 table.classes tr.past td {background: rgba(128, 128, 128, 0.22); color: #9a9a9a; font-style: italic}
+table.classes tr.cancelled td {text-decoration: line-through; opacity: 0.6}
+table.classes tr.cancelled td.note {text-decoration: none; opacity: 1; color: #d9534f; font-weight: 500}
 </style>""", unsafe_allow_html=True)
 
 
@@ -115,13 +117,21 @@ def instructor_html(name: str) -> str:
 
 
 def class_table(rows: pd.DataFrame, columns: dict) -> None:
-    """columns: {column in rows: header}. Rows with is_past set are greyed out."""
-    head = "".join(f"<th>{html.escape(h)}</th>" for h in columns.values())
+    """columns: {column in rows: header}. Rows with is_past set are greyed out, and
+    cancelled ones are struck through with a note saying when it was noticed."""
+    show_note = "status" in rows and (rows["status"] == "cancelled").any()
+    head = "".join(f"<th>{html.escape(h)}</th>" for h in columns.values()) + ("<th></th>" if show_note else "")
     body = []
     for _, r in rows.iterrows():
         cells = "".join(f"<td>{instructor_html(r[c]) if c == 'instructor' else html.escape(str(r[c]))}</td>"
                         for c in columns)
-        body.append(f'<tr class="{"past" if r.get("is_past", False) else ""}">{cells}</tr>')
+        cancelled = r.get("status", "") == "cancelled"
+        if show_note:
+            when = pd.to_datetime(r["cancelled_at"]).strftime("%b %-d") if cancelled and r["cancelled_at"] else ""
+            note = f"Cancelled (noticed {when})" if when else "Cancelled" if cancelled else ""
+            cells += f'<td class="note">{html.escape(note)}</td>'
+        css = " ".join(c for c, on in (("past", r.get("is_past", False)), ("cancelled", cancelled)) if on)
+        body.append(f'<tr class="{css}">{cells}</tr>')
     st.markdown(f'<table class="classes"><thead><tr>{head}</tr></thead>'
                 f'<tbody>{"".join(body)}</tbody></table>', unsafe_allow_html=True)
 
@@ -141,7 +151,10 @@ else:
             class_table(fresh, {"date_label": "date", "time_label": "time", "studio": "studio",
                                 "class_name": "class", "instructor": "instructor", "price": "price"})
 
-st.subheader(f"{len(picked):,} class{'' if len(picked) == 1 else 'es'}")
+n_on = int((picked["status"] != "cancelled").sum())
+n_off = len(picked) - n_on
+st.subheader(f"{n_on:,} class{'' if n_on == 1 else 'es'}"
+             + (f" · {n_off} cancelled" if n_off else ""))
 
 # Studios with classes last, so they draw on top of nearby studios without any.
 on_map = summary.sort_values("n_classes")
